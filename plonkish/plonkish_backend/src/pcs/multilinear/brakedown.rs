@@ -20,6 +20,7 @@ use crate::{
     Error,
 };
 use rand::RngCore;
+use core::num;
 use std::{borrow::Cow, marker::PhantomData, mem::size_of, slice,env};
 use std::time::Instant;
 
@@ -135,24 +136,38 @@ where
 
         let codeword_len = pp.brakedown.codeword_len();
 
+        //println!("rowlen: {row_len}");
+        //println!("codelen: {codeword_len}");
+
         let mut rows = vec![F::ZERO; pp.num_rows * codeword_len];
 
+        //println!("rows len: {:?}", rows.len());
+
         // encode rows
-	let encoding_time = Instant::now();
-        let chunk_size = div_ceil(pp.num_rows, num_threads());
+	    let encoding_time = Instant::now();
+        let mut chunk_size = div_ceil(pp.num_rows, num_threads());
+        if chunk_size%2 != 0 && chunk_size!=1 {
+            chunk_size = chunk_size-1;
+        }
+        //println!("num threads: {:?}", num_threads());
+        //println!("chunk size: {:?}", chunk_size);
         parallelize_iter(
             rows.chunks_exact_mut(chunk_size * codeword_len)
                 .zip(poly.evals().chunks_exact(chunk_size * row_len)),
-            |(rows, evals)| {
-                for (row, evals) in rows
+            |(rws, evals)| {
+                for (row, evals) in rws
                     .chunks_exact_mut(codeword_len)
                     .zip(evals.chunks_exact(row_len))
                 {
                     row[..evals.len()].copy_from_slice(evals);
+                    //println!("row: [{:?}, ... , {:?}]", row.first(), row.last());
                     pp.brakedown.encode(row);
                 }
             },
         );
+        let num_zeroes = rows.iter().filter(|&x| *x == F::from(0)).count();
+        //println!("number of zeroes: {:?}", num_zeroes);
+        //println!("last elem of rows: {:?}", rows.last());
 
 	let now = Instant::now();	
 
@@ -204,6 +219,7 @@ where
             (intermediate_hashes, root)
         };
 
+        //println!("last of rows: {:?}", rows.last());
         Ok(MultilinearBrakedownCommitment {
             rows,
             intermediate_hashes,
@@ -264,8 +280,10 @@ where
                 let coeffs = transcript.squeeze_challenges(pp.num_rows);
                 combine(&mut combined_row, &coeffs);
                 transcript.write_field_elements(&combined_row)?;
+                //println!("IM HEREEEEE");
             }
             combine(&mut combined_row, &t_0);
+            //println!("combined_row: {:?}", combined_row[0]);
             Cow::Owned(combined_row)
         } else {
             Cow::Borrowed(poly.evals())
@@ -277,8 +295,19 @@ where
 
         // open merkle tree
         let depth = codeword_len.next_power_of_two().ilog2() as usize;
-        for _ in 0..pp.brakedown.num_column_opening() {
+        for j in 0..pp.brakedown.num_column_opening() {
             let column = squeeze_challenge_idx(transcript, codeword_len);
+
+            // if j == 0 {
+            //     //println!("rows: {:?}", comm.rows);
+            //     let my_test = comm.rows.iter().skip(column).step_by(codeword_len);
+            //     println!("len of written elems: {:?}", my_test.len());
+            //     for item in my_test {
+            //         println!("{:?}", item);
+            //     }
+            // }
+
+
 
             transcript.write_field_elements(comm.rows.iter().skip(column).step_by(codeword_len))?;
 
@@ -343,16 +372,21 @@ where
         validate_input("verify", vp.num_vars(), [], [point])?;
 
         let row_len = vp.brakedown.row_len();
+        //println!("rowlen: {:?}", row_len);
         let codeword_len = vp.brakedown.codeword_len();
+        //println!("codelen: {:?}", codeword_len);
+        //println!("vp num col openings {:?}", vp.brakedown.num_column_opening());
 
         let (t_0, t_1) = point_to_tensor(vp.num_rows, point);
         let mut combined_rows = Vec::with_capacity(vp.brakedown.num_proximity_testing() + 1);
         if vp.num_rows > 1 {
-            let coeffs = transcript.squeeze_challenges(vp.num_rows);
-            let mut combined_row = transcript.read_field_elements(row_len)?;
-            combined_row.resize(codeword_len, F::ZERO);
-            vp.brakedown.encode(&mut combined_row);
-            combined_rows.push((coeffs, combined_row));
+            for _ in 0..vp.brakedown.num_proximity_testing() {
+                let coeffs = transcript.squeeze_challenges(vp.num_rows);
+                let mut combined_row = transcript.read_field_elements(row_len)?;
+                combined_row.resize(codeword_len, F::ZERO);
+                vp.brakedown.encode(&mut combined_row);
+                combined_rows.push((coeffs, combined_row));
+            }
         }
         combined_rows.push({
             let mut combined_row = transcript.read_field_elements(row_len)?;
@@ -361,9 +395,10 @@ where
             (t_0, combined_row)
         });
 
+
         let depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-        for _ in 0..vp.brakedown.num_column_opening() {
+        for j in 0..vp.brakedown.num_column_opening() {
             let column = squeeze_challenge_idx(transcript, codeword_len);
             let items = transcript.read_field_elements(vp.num_rows)?;
             let path = transcript.read_commitments(depth)?;
@@ -375,11 +410,22 @@ where
                 } else {
                     items[0]
                 };
+                // if(j == 0){
+                //     println!("items: {:?}", items);
+                //     println!("coeff: {:?}", coeff);
+                //     println!("item: {:?}", item);
+                //     println!("encoded: {:?}", encoded[column]);
+                // }
                 if item != encoded[column] {
+                    // println!("items: {:?}", items);
+                    // println!("coeff: {:?}", coeff);
+                    // println!("items len: {:?}", items.len());
+                    // println!("coeff len: {:?}", coeff.len());
+                    // println!("item: {:?}", item);
+                    // println!("encoded: {:?}", encoded[column]);
                     return Err(Error::InvalidPcsOpen("Proximity failure".to_string()));
                 }
             }
-
             // verify merkle tree opening
             let mut hasher = H::new();
             let mut output = {
@@ -438,6 +484,7 @@ where
         }
         Ok(())
     }
+
 }
 
 fn point_to_tensor<F: PrimeField>(num_rows: usize, point: &[F]) -> (Vec<F>, Vec<F>) {
@@ -465,22 +512,24 @@ mod test {
             brakedown::MultilinearBrakedown,
             test::{run_batch_commit_open_verify, run_commit_open_verify},
         },
-        util::{code::BrakedownSpec6, hash::{Keccak256,Output,Hash}, transcript::Keccak256Transcript},
+        util::{code::BrakedownSpec6, code::BrakedownSpec5, code::BrakedownSpec4, code::BrakedownSpec3, code::BrakedownSpec2, code::BrakedownSpec1,
+             goldilocksMont::GoldilocksMont, hash::{Hash, Keccak256, Output}, transcript::Keccak256Transcript},
     };
     use halo2_curves::{ff::Field,bn256::Fr};
     use crate::util::transcript::{InMemoryTranscript,FieldTranscriptRead,FieldTranscriptWrite,FieldTranscript,TranscriptWrite,TranscriptRead,Blake2sTranscript};
     use crate::util::hash::Blake2s;
     use std::{io};
+    use crate::util::{ff_255::{ff255::Ft255, ft127::Ft127, ft63::Ft63}};
 
 
-    type Pcs = MultilinearBrakedown<Fr, Blake2s, BrakedownSpec6>;
+    type Pcs = MultilinearBrakedown<Ft127, Blake2s, BrakedownSpec1>;
 
     #[test]
     fn commit_open_verify() {
         run_commit_open_verify::<_, Pcs, Blake2sTranscript<_>>();
     }
 
-//    #[test]
+    #[test]
     fn batch_commit_open_verify() {
         run_batch_commit_open_verify::<_, Pcs, Blake2sTranscript<_>>();
     }

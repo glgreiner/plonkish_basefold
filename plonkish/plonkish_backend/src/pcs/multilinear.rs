@@ -112,7 +112,7 @@ fn quotients<F: Field, T>(
     (quotients, remainder[0])
 }
 
-mod additive {
+pub mod additive {
     use crate::{
         pcs::{
             multilinear::validate_input, AdditiveCommitment, Evaluation, Point,
@@ -279,6 +279,179 @@ mod additive {
         };
         Pcs::verify(vp, &g_prime_comm, &challenges, &g_prime_eval, transcript)
     }
+
+    pub fn batch_open_one<F, Pcs>(
+        pp: &Pcs::ProverParam,
+        num_vars: usize,
+        polys: Vec<&Pcs::Polynomial>,
+        comms: Vec<&Pcs::Commitment>,
+        points: &[Point<F, Pcs::Polynomial>],
+        evals: &[Evaluation<F>],
+        transcript: &mut impl TranscriptWrite<Pcs::CommitmentChunk, F>,
+    ) -> Result<(), Error>
+    where
+        F: PrimeField,
+        Pcs: PolynomialCommitmentScheme<F, Polynomial = MultilinearPolynomial<F>>,
+    {
+        validate_input("batch open", num_vars, polys.clone(), points)?;
+
+        let ell = evals.len().next_power_of_two().ilog2() as usize;
+        let t = transcript.squeeze_challenges(ell);
+
+        let timer = start_timer(|| "merged_polys");
+        let eq_xt = MultilinearPolynomial::eq_xy(&t);
+        let merged_polys = evals.iter().zip(eq_xt.evals().iter()).fold(
+            vec![(F::ONE, Cow::<MultilinearPolynomial<_>>::default()); points.len()],
+            |mut merged_polys, (eval, eq_xt_i)| {
+                if merged_polys[eval.point()].1.is_zero() {
+                    merged_polys[eval.point()] = (*eq_xt_i, Cow::Borrowed(polys[eval.poly()]));
+                } else {
+                    let coeff = merged_polys[eval.point()].0;
+                    if coeff != F::ONE {
+                        merged_polys[eval.point()].0 = F::ONE;
+                        *merged_polys[eval.point()].1.to_mut() *= &coeff;
+                    }
+                    *merged_polys[eval.point()].1.to_mut() += (eq_xt_i, polys[eval.poly()]);
+                }
+                merged_polys
+            },
+        );
+        end_timer(timer);
+
+        let unique_merged_polys = merged_polys
+            .iter()
+            .unique_by(|(_, poly)| addr_of!(*poly.deref()))
+            .collect_vec();
+        let unique_merged_poly_indices = unique_merged_polys
+            .iter()
+            .enumerate()
+            .map(|(idx, (_, poly))| (addr_of!(*poly.deref()), idx))
+            .collect::<HashMap<_, _>>();
+        let expression = merged_polys
+            .iter()
+            .enumerate()
+            .map(|(idx, (scalar, poly))| {
+                let poly = unique_merged_poly_indices[&addr_of!(*poly.deref())];
+                Expression::<F>::eq_xy(idx)
+                    * Expression::Polynomial(Query::new(poly, Rotation::cur()))
+                    * scalar
+            })
+            .sum();
+        let virtual_poly = VirtualPolynomial::new(
+            &expression,
+            unique_merged_polys.iter().map(|(_, poly)| poly.deref()),
+            &[],
+            points,
+        );
+        let tilde_gs_sum =
+            inner_product(evals.iter().map(Evaluation::value), &eq_xt[..evals.len()]);
+        let (challenges, _) =
+            SumCheck::prove(&(), num_vars, virtual_poly, tilde_gs_sum, transcript)?;
+
+        let timer = start_timer(|| "g_prime");
+        let eq_xy_evals = points
+            .iter()
+            .map(|point| eq_xy_eval(&challenges, point))
+            .collect_vec();
+        let g_prime = merged_polys
+            .into_iter()
+            .zip(eq_xy_evals.iter())
+            .map(|((scalar, poly), eq_xy_eval)| (scalar * eq_xy_eval, poly.into_owned()))
+            .sum::<MultilinearPolynomial<_>>();
+        end_timer(timer);
+
+        let (g_prime_comm, g_prime_eval) = if cfg!(feature = "sanity-check") {
+            let scalars = evals
+                .iter()
+                .zip(eq_xt.evals())
+                .map(|(eval, eq_xt_i)| eq_xy_evals[eval.point()] * eq_xt_i)
+                .collect_vec();
+            let bases = evals.iter().map(|eval| comms[eval.poly()]);
+            let something = bases.into_iter().collect_vec();
+            //println!("coms 0: {:?}", comms[0]);
+            //p//rintln!("coms 1: {:?}", comms[1]);
+            //println!("coms 2: {:?}", comms[2]);
+            //let comm = Pcs::Commitment::sum_with_scalar(&scalars, bases);
+            let mut scalar = F::ZERO;
+            for s in scalars {
+                scalar += s;
+            }
+
+            // println!("scalar: {:?}", scalar);
+            // println!("eval on comm: {:?}", polys[0].evaluate(&challenges));
+            // println!("eval on comm scaled: {:?}", polys[0].evaluate(&challenges)*scalar);
+            // println!("inverted gprime eval: {:?}", g_prime.evaluate(&challenges)*scalar.invert().unwrap());
+
+            (comms[0].clone(), g_prime.evaluate(&challenges)*scalar.invert().unwrap())
+        } else {
+            (Pcs::Commitment::default(), F::ZERO)
+        };
+
+        //println!("eval on comm: {:?}", polys[0].evaluate(&challenges));
+
+        // println!("g prime eval: {:?}", g_prime_eval);
+        // println!("challs: {:?}", challenges);
+
+        Pcs::open(
+            pp,
+            &polys[0],
+            &g_prime_comm,
+            &challenges,
+            &g_prime_eval,
+            transcript,
+        )
+    }
+
+    pub fn batch_verify_one<F, Pcs>(
+        vp: &Pcs::VerifierParam,
+        num_vars: usize,
+        comm: Pcs::Commitment,
+        points: &[Point<F, Pcs::Polynomial>],
+        evals: &[Evaluation<F>],
+        transcript: &mut impl TranscriptRead<Pcs::CommitmentChunk, F>,
+    ) -> Result<(), Error>
+    where
+        F: PrimeField,
+        Pcs: PolynomialCommitmentScheme<F, Polynomial = MultilinearPolynomial<F>>,
+
+    {
+        validate_input("batch verify", num_vars, [], points)?;
+
+        let ell = evals.len().next_power_of_two().ilog2() as usize;
+        let t = transcript.squeeze_challenges(ell);
+
+        let eq_xt = MultilinearPolynomial::eq_xy(&t);
+        let tilde_gs_sum =
+            inner_product(evals.iter().map(Evaluation::value), &eq_xt[..evals.len()]);
+        let (g_prime_eval, challenges) =
+            SumCheck::verify(&(), num_vars, 2, tilde_gs_sum, transcript)?;
+
+        // println!("sumcheck passed!");
+
+        // println!("g prime eval: {:?}", g_prime_eval);
+        // println!("challs: {:?}", challenges);
+
+        let eq_xy_evals = points
+            .iter()
+            .map(|point| eq_xy_eval(&challenges, point))
+            .collect_vec();
+        let scalars = evals
+            .iter()
+            .zip(eq_xt.evals())
+            .map(|(eval, eq_xt_i)| eq_xy_evals[eval.point()] * eq_xt_i)
+            .collect_vec();
+
+        let mut scalar = F::ZERO;
+        for s in scalars {
+            scalar += s;
+        }
+
+        //println!("scalar: {:?}", scalar);
+        
+        let comm_eval= (g_prime_eval * scalar.invert().unwrap());
+
+        Pcs::verify(vp, &comm, &challenges, &comm_eval, transcript)
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +530,7 @@ mod test {
             + TranscriptWrite<Pcs::CommitmentChunk, F>
             + InMemoryTranscript<Param = ()>,
     {
-        for num_vars in 10..25  {
+        for num_vars in 5..=25  {
 	    println!("k {:?}", num_vars);
             // Setup
             let (pp, vp) = {
@@ -397,6 +570,7 @@ mod test {
                     &mut transcript,
                 )
             };
+            //println!("RESSSSSS: {:?}", result);
             assert_eq!(result, Ok(()));
         }
     }

@@ -15,4 +15,8 @@ use crate::util::{BigUint, {arithmetic::{modulus,Field}}};
 #[PrimeFieldReprEndianness = "little"]
 pub struct GoldilocksMont([u64;2]);
 
-
+impl GoldilocksMont{
+    pub const fn from_value(val: [u64; 2]) -> Self {
+        GoldilocksMont(val)
+    }
+}

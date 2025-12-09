@@ -710,6 +710,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ff-derive-num"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e715451ab983be06481e927a275ec12372103ad426c7cb82cebfe14698ed4cf4"
+dependencies = [
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "ff_derive"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1311,6 +1323,7 @@ dependencies = [
  "crossbeam",
  "ctr",
  "ff",
+ "ff-derive-num",
  "generic-array",
  "halo2_proofs",
  "halo2curves",
@@ -1318,6 +1331,7 @@ dependencies = [
  "itertools 0.13.0",
  "num-bigint 0.4.6",
  "num-integer",
+ "num-traits",
  "pasta_curves",
  "paste",
  "plonky2_util",

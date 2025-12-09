@@ -135,7 +135,7 @@ pub trait PolynomialCommitmentScheme<F: Field>: Clone + Debug {
 pub struct Evaluation<F> {
     poly: usize,
     point: usize,
-    value: F,
+    pub value: F,
 }
 
 impl<F> Evaluation<F> {
